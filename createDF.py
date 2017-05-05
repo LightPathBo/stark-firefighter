@@ -3,58 +3,67 @@ from pyspark.sql import SparkSession
 from pyspark.ml.feature import RFormula
 
 from pyhdf import SD as hdf
+from simVhd import DFbuilder, Grafica, LoadHdf
 
-class DFbuilder:
-    def __init__(self):
-        self.dataframe = []
-        self.tmp =[]
-    def addFeat(self,valueF):
-        self.tmp.append(valueF)
-    def addLab(self,valueL):
-        self.tmp.append(valueL)
-        self.dataframe.append(self.tmp)
-        self.tmp = []
-    def addFL(self, valueF, valueL):
-        self.dataframe.append([valueF,valueL])
-    def getDataframe(self):
-        return self.dataframe
+class ExportHdf:
+    pass
 
 if __name__ == "__main__":
     spark = SparkSession.builder.master("local").appName("FireFigther").getOrCreate()
 
-    fileSD = hdf.SD('datos/MOD11_L2.A2017096.1445.006.2017097093512.hdf')
-    emision = fileSD.select('Emis_31')
-    lst = fileSD.select('LST')
+    fileSD = hdf.SD('datos/MYD06_L2.A2016120.0555.006.2016121022047.hdf')
+    fileSDP = hdf.SD('datos/MYD06_L2.A2017120.0605.006.NR.hdf')
 
-    testDF = DFbuilder()
+    arch = LoadHdf('datos/MYD06_L2.A2016120.0555.006.2016121022047.hdf')
+    arch.conf('Longitude')
+    arch.conf('Latitude')
+    # Some conditions
+    arch.conf('Surface_Temperature')
+    arch.conf('Cloud_Effective_Emissivity')
+    arch.create()
 
-    for i in range(4):
-        for j in range(len(emision[i])):
-            e = emision[i][j]
-            l = lst[i][j]
-            if e != 0 or l !=0:
-               #testDF.addFL(int(e), int(e))
-                testDF.addFeat(int(l*0.02))
-                testDF.addFeat(int(e))
-                testDF.addLab(int(l*0.02))
-    print testDF.getDataframe()[:4]
+    archP = LoadHdf('datos/MYD06_L2.A2017120.0605.006.NR.hdf')
+    archP.conf('Surface_Temperature')
+    archP.create()
+    #----------------------
+
+    lat = arch.getData('Latitude')
+    lon = arch.getData('Longitude')
+    latM = min(map(lambda x: min(x), lat[:]))
+    latX = max(map(lambda x: max(x), lat[:]))
+    lonM = min(map(lambda x: min(x), lon[:]))
+    lonX = max(map(lambda x: max(x), lon[:]))
 
     # Load training data
-    test = spark.createDataFrame(testDF.getDataframe(),
-        ['T','E','TE']) # Temperatura, Emisividad, TemperaturaPosterior
-
-    formula = RFormula(
-        formula="TE ~ T + E",
-        featuresCol="features",
-        labelCol="label")
-    output = formula.fit(test).transform(test)
-    #output.select("features", "label").show()
-    output.show()
+    data = spark.createDataFrame((arch + archP), arch.labels + ['Surface_TemperatureP'])
+    train, test =data.randomSplit([0.6, 0.4])
+    formula = RFormula(formula="Surface_TemperatureP ~ Surface_Temperature + Cloud_Effective_Emissivity", featuresCol="features", labelCol="label")
+    #outputTrain = formula.fit(train).transform(train)
+    #outputTest = formula.fit(test).transform(test)
+    output = formula.fit(data).transform(data)
 
     glr = GeneralizedLinearRegression(family="gaussian", link="identity", maxIter=10, regParam=0.3)
-
-    # Fit the model
     gModel = glr.fit(output)
-
     result = gModel.transform(output)
     result.show()
+
+    prev = map(lambda x: int(x[0]), result.select('prediction').collect())
+
+    lin = arch.cols
+    final=[]
+
+    for i in range(len(prev)/lin):
+        tmp = prev[i*lin:(i+1)*lin]
+        if len(tmp)!=0:
+            final.append(tmp)
+
+    summary = gModel.summary
+    print("Dispersion: " + str(summary.dispersion))
+
+    test = Grafica(lonM, lonX, latM, latX)
+    test.plotM('coordenadas')
+    test.plot(arch.getData('Surface_Temperature'), 'tempI', 'Surface_Temperature_Initial')
+    test.plot(arch.getData('Cloud_Effective_Emissivity'), 'emiI', 'Cloud_Effective_Emissivity_Initial')
+    test.plot(archP.getData('Surface_Temperature'), 'TEMPR', 'Surface_Temperature_Final')
+    test.plot(final, 'TEMPP', 'Surface_Temperature_Prediction')
+    
